@@ -438,7 +438,8 @@ API Key：
 7. 技术审校；
 8. 教学审校；
 9. candidate revision；
-10. 人工批准并形成 StyleSheetRevision。
+10. reader trial：按 9.5 的 ReaderTrial 规则对样章执行冷启动试读，作者处理全部发现；
+11. 人工批准并形成 StyleSheetRevision。
 
 样章未批准时，API 拒绝 batch generation，而不是只在前端禁用按钮。
 
@@ -505,14 +506,15 @@ ReaderTrial 默认 `reader_kind=automated`：
 - 模拟读者的输入只有 ChapterRevision 正文、BookContract 读者画像和一个新建的 course-runner 隔离工作区，看不到 EvidencePack、ClaimPlan、生成提示或答案视图；
 - 它按正文顺序执行命令和代码，执行同样受 sandbox 限制，只运行本章生成的教学工件，不运行导入仓库；
 - 每个发现带正文位置、执行记录和类别（隐藏前提、跳步、术语未定义、命令失败、无法恢复）；作者对每条发现写入 author_decisions_json（确认/驳回及理由），确认的发现转为待修复缺陷；
-- 只有作者处理完全部发现后，reader trial 阶段才算完成；UI 和导出报告显示为“自动化试读”，不得显示为真人试读或“目标读者可独立完成”的证明；
+- 确认的阻断性发现（隐藏前提阻断主线、命令失败、无法恢复）必须修复，并对受影响的修订重新运行 ReaderTrial；其余确认的发现须修复或在 author_decisions_json 记录不修复的理由；
+- 只有全部发现都有处理结论、且最近一次试读没有未修复的确认阻断性发现时，reader trial 阶段才算完成，之后才能进入 explicit approval；UI 和导出报告显示为“自动化试读”，不得显示为真人试读或“目标读者可独立完成”的证明；
 - 真人试读使用同一记录结构，`reader_kind=human`，与自动化结果分开展示。
 
 QualityAssessment 各维度使用 0–4 rubric。关键事实无证据、代码验证失败、隐藏前提阻断主线、跨章矛盾、教学实现冒充生产实现、权利状态不明却进入出版包等均为 hard failure，不能被平均分抵消，也不能豁免。
 
 QualityWaiver 规则：
 
-- 章节批准要求无 hard failure；维度低于 3 时，用户可对单个维度创建 QualityWaiver（必须填写 reason），API 校验该维度不属于 hard failure 后才允许批准；
+- 章节批准要求无 hard failure；维度为 2 时，用户可对单个维度创建 QualityWaiver（必须填写 reason），API 校验该维度不属于 hard failure 且 score = 2 后才允许批准；维度为 0 或 1 视同 hard failure，拒绝创建 waiver；
 - QualityWaiver 绑定被评估内容的 content_hash；内容变化后由应用层置 revoked_at，章节回到需重新评估状态；
 - 质量报告与完整性报告单独列出生效中的 waiver；
 - BookBuild 进入 `publication_candidate` 前要求所有章节无生效 waiver，且整本 QualityAssessment 各维度至少为 3，与 `AGENTS.md` 的出版候选门槛一致。
@@ -639,7 +641,8 @@ Canonical Book AST 处理目录、编号、图题、代码题注、交叉引用�
 - 术语冲突、先修 DAG 断裂、重复/矛盾 claim 或贯穿项目代码状态不连续；
 - RightsItem 缺少允许出版的依据或署名方式；
 - 书名页字段被伪造，或出版社待确认清单未处理；
-- 编校差错预检超过 1‱，或无法完成实际 DOCX/PDF 版面校对。
+- 编校差错预检超过 1‱，或无法完成实际 DOCX/PDF 版面校对；
+- 生效中的 QualityWaiver（维度、分数、理由、content_hash），单独列出，不与达标项混排；存在时不得进入“出版候选”。
 
 个人学习导出可带水印继续；“出版候选”必须对硬问题 fail-closed。
 
@@ -666,13 +669,14 @@ Canonical Book AST 处理目录、编号、图题、代码题注、交叉引用�
 | 系列根博客 | `blogs.is_series = true` 且 `parent_id IS NULL` | 一个 TextbookProject，title 取自根博客 |
 | 系列子博客 | `parent_id` 指向系列根 | 该项目下的 Chapter，sort 取 `chapter_sort` |
 | 单篇博客 | 非系列且无 parent | 一个单章 TextbookProject |
-| 旧复述记录 | review-service 中关联到博客的复述会话 | 对应章节 LearningObjective 的 explain 维度历史 MasteryAttempt |
+| 旧复述记录 | review-service 中复述会话的 blog_id | 对应章节 LearningObjective 的 explain 维度历史 MasteryAttempt |
 | 软删除数据 | `deleted_at IS NOT NULL` | 不迁移，只保留在备份中 |
 
 转换规则：
 
 - 旧正文写入一个 ChapterRevision（`created_by=legacy_migration`），Chapter 状态为“需补证”；不设置 locked_revision_id，不视为人工终稿或已批准；
 - 旧 audience 无法可靠推断时，项目 audience 标记为待用户设置，未设置前不允许生成；
+- 旧复述记录只按 blog_id → chapter_id 映射归属；blog_id 缺失、指向软删除或未迁移博客的记录列入 dry-run 的无法映射项，保留原始数据且不导入，不按标题或内容猜测归属；
 - 旧复述记录只写 explain 维度并标记 legacy，不推断 complete/reproduce/transfer/diagnose，不产生 retain；ReviewCard 在迁移后首次作答时按新规则创建；
 - 所有旧 user_id 的数据都并入本地 Workspace，预演报告列出来源 user_id；
 - 每条映射写入 LegacyMigrationRecord，以 (legacy_kind, legacy_id) 唯一约束保证重复执行不产生重复项目。
@@ -753,9 +757,10 @@ frontend/src/features/
 - 复用固定 Gin SHA 和现有 EvidencePack；
 - 蓝图批准后只生成一章候选稿；
 - 加入 ScenarioFrame 门禁；
+- 样章 ReaderTrial（AI 模拟读者冷启动试读）与作者处理发现；
 - 人工批准后用现有 ZIP/Markdown 导出。
 
-退出条件：零基础 Gin 样章完整走通且不需要登录。
+退出条件：零基础 Gin 样章完整走通且不需要登录；样章完成一次自动化试读，全部发现有作者结论。
 
 ### Phase 2：多资料源与官方文档栈
 
@@ -860,6 +865,9 @@ frontend/src/features/
 - RightsItem 仅标记“网上公开”却没有出版权利依据；
 - 自动检查伪装成人工同行评审或官方出版质量认定；
 - 对 hard failure 创建 QualityWaiver 被拒绝；
+- 对 score 为 0 或 1 的维度创建 QualityWaiver 被拒绝；
+- ReaderTrial 存在已确认但未修复的阻断性发现时，样章批准或 BookBuild 进入 publication_candidate 被拒绝；
+- 无法按 blog_id 映射的旧复述记录被导入或按标题猜测归属；
 - 已豁免章节内容修改后 waiver 失效；
 - 存在生效 waiver 的章节进入 publication_candidate 被拒绝；
 - AI 模拟试读结果被展示为真人试读；
@@ -880,7 +888,7 @@ frontend/src/features/
 - sample chapter human pass；
 - ChapterProfile coverage：完整样章和风格探针覆盖全书主要类型；
 - self-study hard failures：0；AI 模拟试读走完主线路径，全部发现经作者确认或驳回；
-- quality rubric：章节批准 hard failures = 0，低于 3/4 的维度必须有生效 waiver；出版候选原稿所有维度 >= 3/4、hard failures = 0 且无生效 waiver；
+- quality rubric：章节批准 hard failures = 0、所有维度 >= 2/4，等于 2/4 的维度必须有生效 waiver；出版候选原稿所有维度 >= 3/4、hard failures = 0 且无生效 waiver；
 - whole-book consistency：术语冲突、断裂交叉引用、DAG 逆序、代码状态断裂 = 0；
 - publication preflight：RightsItem 完整，书名页无伪造字段，编校差错预检 <= 1‱；
 - delayed mastery pass；
